@@ -130,8 +130,11 @@ def point_add(p1: CurvePoint, p2: CurvePoint, curve=Secp256r1) -> CurvePoint:
     return CurvePoint(x3, y3, False)
 
 
+SCALAR_BITS = 256
+
+
 def scalar_mult_constant_time(scalar: int, point: CurvePoint, curve=Secp256r1) -> CurvePoint:
-    if point.infinity or scalar == 0:
+    if point.infinity:
         return CurvePoint(0, 0, True)
 
     scalar = scalar % curve.n
@@ -141,13 +144,15 @@ def scalar_mult_constant_time(scalar: int, point: CurvePoint, curve=Secp256r1) -
     result = CurvePoint(0, 0, True)
     addend = CurvePoint(point.x, point.y, point.infinity)
 
-    bits = scalar.bit_length()
-    for i in range(bits):
+    for i in range(SCALAR_BITS):
         bit = (scalar >> i) & 1
+
         tmp = point_add(result, addend, curve)
-        result.x = constant_time_select(bit, tmp.x, result.x)
-        result.y = constant_time_select(bit, tmp.y, result.y)
-        result.infinity = bool(constant_time_select(bit, 1 if tmp.infinity else 0, 1 if result.infinity else 0))
+        new_x = constant_time_select(bit, tmp.x, result.x)
+        new_y = constant_time_select(bit, tmp.y, result.y)
+        new_inf = constant_time_select(bit, 1 if tmp.infinity else 0, 1 if result.infinity else 0)
+        result.x, result.y, result.infinity = new_x, new_y, bool(new_inf)
+
         addend = point_double(addend, curve)
 
     return result

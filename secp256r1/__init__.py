@@ -6,6 +6,9 @@ from .field_ops import (
     mod_inv,
     constant_time_equal,
     constant_time_select,
+    hmac_sha256,
+    sha256,
+    MODPOW_EXPONENT_BITS,
 )
 from .curve import (
     CurvePoint,
@@ -17,6 +20,7 @@ from .curve import (
     point_double,
     scalar_mult,
     scalar_mult_base,
+    SCALAR_BITS,
 )
 from .ecdsa import (
     generate_keypair,
@@ -38,6 +42,9 @@ __all__ = [
     "mod_inv",
     "constant_time_equal",
     "constant_time_select",
+    "hmac_sha256",
+    "sha256",
+    "MODPOW_EXPONENT_BITS",
     "CurvePoint",
     "Secp256r1",
     "INFINITY",
@@ -47,6 +54,7 @@ __all__ = [
     "point_double",
     "scalar_mult",
     "scalar_mult_base",
+    "SCALAR_BITS",
     "generate_keypair",
     "sign",
     "verify",

@@ -1,4 +1,6 @@
 import secrets
+import hashlib
+import hmac as _hmac_mod
 
 
 def mod_add(a: int, b: int, p: int) -> int:
@@ -18,13 +20,15 @@ def mod_mul(a: int, b: int, p: int) -> int:
     return result
 
 
+MODPOW_EXPONENT_BITS = 256
+
+
 def mod_pow(base: int, exponent: int, p: int) -> int:
     if p == 1:
         return 0
     result = 1
     base = base % p
-    exponent_bits = exponent.bit_length()
-    for i in range(exponent_bits - 1, -1, -1):
+    for i in range(MODPOW_EXPONENT_BITS - 1, -1, -1):
         result = mod_mul(result, result, p)
         bit = (exponent >> i) & 1
         tmp = mod_mul(result, base, p)
@@ -74,3 +78,12 @@ def secure_random_int(min_val: int, max_val: int) -> int:
 
 def secure_random_bytes(n: int) -> bytes:
     return secrets.token_bytes(n)
+
+
+def hmac_sha256(key: bytes, msg: bytes) -> bytes:
+    return _hmac_mod.new(key, msg, hashlib.sha256).digest()
+
+
+def sha256(msg: bytes) -> bytes:
+    return hashlib.sha256(msg).digest()
+
