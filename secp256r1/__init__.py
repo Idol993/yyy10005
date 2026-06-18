@@ -33,6 +33,17 @@ from .ecdsa import (
     signature_to_der,
     der_to_signature,
 )
+from .ecdh import (
+    ecdh_compute_shared_secret,
+    ecdh_compute_shared_secret_and_hash,
+    ecdh_verify_consistency,
+)
+from .pem import (
+    private_key_to_pem,
+    pem_to_private_key,
+    public_key_to_pem,
+    pem_to_public_key,
+)
 
 __all__ = [
     "mod_add",
@@ -64,4 +75,12 @@ __all__ = [
     "hex_to_public_key",
     "signature_to_der",
     "der_to_signature",
+    "ecdh_compute_shared_secret",
+    "ecdh_compute_shared_secret_and_hash",
+    "ecdh_verify_consistency",
+    "private_key_to_pem",
+    "pem_to_private_key",
+    "public_key_to_pem",
+    "pem_to_public_key",
 ]
+

@@ -18,6 +18,7 @@ from secp256r1 import (
     mod_inv,
     constant_time_equal,
     constant_time_select,
+    sha256,
     is_point_on_curve,
     validate_point,
     point_add,
@@ -33,6 +34,13 @@ from secp256r1 import (
     hex_to_public_key,
     signature_to_der,
     der_to_signature,
+    ecdh_compute_shared_secret,
+    ecdh_compute_shared_secret_and_hash,
+    ecdh_verify_consistency,
+    private_key_to_pem,
+    pem_to_private_key,
+    public_key_to_pem,
+    pem_to_public_key,
 )
 
 
@@ -577,5 +585,383 @@ class TestMultiMessageConsistency(unittest.TestCase):
             self.assertEqual(s, sigs[0])
 
 
+# =========================================================================
+# PART 11: DER 签名严格解析测试（边界与恶意输入）
+# =========================================================================
+
+
+class TestDERSignatureStrict(unittest.TestCase):
+    def test_negative_integer_0x80_rejected(self):
+        bad_der = b"\x30\x06\x02\x01\x80\x02\x01\x01"
+        with self.assertRaises(ValueError) as ctx:
+            der_to_signature(bad_der)
+        self.assertIn("negative INTEGER", str(ctx.exception))
+
+    def test_negative_integer_0xff_leading_rejected(self):
+        bad_der = b"\x30\x07\x02\x02\xFF\x80\x02\x01\x01"
+        with self.assertRaises(ValueError) as ctx:
+            der_to_signature(bad_der)
+        self.assertIn("negative INTEGER", str(ctx.exception))
+
+    def test_high_bit_integer_with_proper_prefix_accepted(self):
+        r = 0x81
+        s = 1
+        r_bytes = bytes([0x00, 0x81])
+        r_enc = bytes([0x02, len(r_bytes)]) + r_bytes
+        s_enc = bytes([0x02, 0x01, 0x01])
+        content = r_enc + s_enc
+        der = bytes([0x30, len(content)]) + content
+        self.assertEqual(der_to_signature(der), (r, s))
+
+    def test_zero_length_integer_rejected(self):
+        bad_der = bytes([0x30, 0x04, 0x02, 0x00, 0x02, 0x01, 0x01])
+        with self.assertRaises(ValueError):
+            der_to_signature(bad_der)
+
+    def test_unnecessary_leading_zero_rejected(self):
+        bad_r_enc = bytes([0x02, 0x02, 0x00, 0x7F])
+        s_enc = bytes([0x02, 0x01, 0x01])
+        bad_content = bad_r_enc + s_enc
+        bad_der = bytes([0x30, len(bad_content)]) + bad_content
+        with self.assertRaises(ValueError) as ctx:
+            der_to_signature(bad_der)
+        self.assertIn("unnecessary leading", str(ctx.exception))
+
+    def test_trailing_garbage_rejected(self):
+        good_der = signature_to_der((123, 456))
+        with self.assertRaises(ValueError):
+            der_to_signature(good_der + b"\x00\x00")
+
+    def test_garbage_between_integers_rejected(self):
+        r_enc = bytes([0x02, 0x01, 0x01])
+        s_enc = bytes([0x02, 0x01, 0x01])
+        bad_content = r_enc + b"\x00" + s_enc
+        bad_der = bytes([0x30, len(bad_content)]) + bad_content
+        with self.assertRaises(ValueError):
+            der_to_signature(bad_der)
+
+    def test_long_form_length_rejected(self):
+        bad_der = bytes([0x30, 0x81, 0x08, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01])
+        with self.assertRaises(ValueError):
+            der_to_signature(bad_der)
+
+    def test_signature_to_der_zero_rejected(self):
+        with self.assertRaises(ValueError):
+            signature_to_der((0, 1))
+        with self.assertRaises(ValueError):
+            signature_to_der((1, 0))
+
+    def test_signature_to_der_out_of_range_rejected(self):
+        with self.assertRaises(ValueError):
+            signature_to_der((Secp256r1.n, 1))
+
+
+# =========================================================================
+# PART 12: 签名/验签 Prehashed 模式测试
+# =========================================================================
+
+
+class TestPrehashedSignVerify(unittest.TestCase):
+    def test_prehashed_sign_verify_roundtrip(self):
+        d, Q = generate_keypair()
+        msg = b"test message for prehashed"
+        digest = sha256(msg)
+        sig = sign(d, digest, prehashed=True)
+        self.assertTrue(verify(Q, digest, sig, prehashed=True))
+
+    def test_prehashed_and_original_independent(self):
+        d, Q = generate_keypair()
+        msg = b"hello"
+        digest = sha256(msg)
+        sig_original = sign(d, msg)
+        sig_prehashed = sign(d, digest, prehashed=True)
+        self.assertNotEqual(sig_original, sig_prehashed)
+        self.assertTrue(verify(Q, msg, sig_original))
+        self.assertTrue(verify(Q, digest, sig_prehashed, prehashed=True))
+
+    def test_prehashed_cross_mode_verify_fails(self):
+        d, Q = generate_keypair()
+        msg_a = b"message alpha"
+        msg_b = b"message beta"
+        digest_a = sha256(msg_a)
+        digest_b = sha256(msg_b)
+        sig_raw = sign(d, msg_a)
+        sig_hash = sign(d, digest_b, prehashed=True)
+        self.assertFalse(verify(Q, digest_b, sig_raw, prehashed=True))
+        self.assertFalse(verify(Q, digest_a, sig_hash, prehashed=True))
+        self.assertFalse(verify(Q, msg_b, sig_raw))
+
+    def test_prehashed_wrong_length_rejected(self):
+        d, _ = generate_keypair()
+        with self.assertRaises(ValueError) as ctx:
+            sign(d, b"short", prehashed=True)
+        self.assertIn("32 bytes", str(ctx.exception))
+
+        with self.assertRaises(ValueError):
+            sign(d, b"x" * 33, prehashed=True)
+
+    def test_prehashed_verify_wrong_length_returns_false(self):
+        _, Q = generate_keypair()
+        self.assertFalse(verify(Q, b"short", (1, 2), prehashed=True))
+
+    def test_prehashed_and_deterministic_conflict_rejected(self):
+        d, _ = generate_keypair()
+        digest = sha256(b"x")
+        with self.assertRaises(ValueError):
+            sign(d, digest, prehashed=True, deterministic=True)
+
+    def test_prehashed_correct_equivalence(self):
+        d, Q = generate_keypair()
+        msg = b"exact equivalence check"
+        digest = sha256(msg)
+        k = 0x123456789ABCDEF123456789ABCDEF123456789ABCDEF123456789ABCDEF123
+        sig1 = sign(d, msg, k=k)
+        sig2 = sign(d, digest, prehashed=True, k=k)
+        self.assertEqual(sig1, sig2)
+
+
+# =========================================================================
+# PART 13: ECDH 共享密钥测试
+# =========================================================================
+
+
+class TestECDH_Consistency(unittest.TestCase):
+    """ECDH 一致性测试（自生成，非官方向量）"""
+
+    def test_ecdh_mutual_agreement(self):
+        dA, QA = generate_keypair()
+        dB, QB = generate_keypair()
+        secretAB = ecdh_compute_shared_secret(dA, QB)
+        secretBA = ecdh_compute_shared_secret(dB, QA)
+        self.assertEqual(secretAB, secretBA)
+        self.assertEqual(len(secretAB), 32)
+
+    def test_ecdh_consistency_check(self):
+        dA, QA = generate_keypair()
+        dB, QB = generate_keypair()
+        self.assertTrue(ecdh_verify_consistency(dA, QA, dB, QB))
+
+    def test_ecdh_different_pairs_different_secrets(self):
+        dA, QA = generate_keypair()
+        dB, QB = generate_keypair()
+        dC, QC = generate_keypair()
+        secretAB = ecdh_compute_shared_secret(dA, QB)
+        secretAC = ecdh_compute_shared_secret(dA, QC)
+        self.assertNotEqual(secretAB, secretAC)
+
+    def test_ecdh_shared_secret_and_hash(self):
+        dA, QA = generate_keypair()
+        dB, QB = generate_keypair()
+        raw = ecdh_compute_shared_secret(dA, QB)
+        hashed = ecdh_compute_shared_secret_and_hash(dA, QB)
+        self.assertEqual(hashed, sha256(raw))
+        self.assertEqual(len(hashed), 32)
+
+    def test_ecdh_reject_infinity(self):
+        dA, _ = generate_keypair()
+        with self.assertRaises(ValueError):
+            ecdh_compute_shared_secret(dA, INFINITY)
+
+    def test_ecdh_reject_invalid_curve_point(self):
+        dA, _ = generate_keypair()
+        bad_point = CurvePoint(1, 2, False)
+        with self.assertRaises(ValueError):
+            ecdh_compute_shared_secret(dA, bad_point)
+
+    def test_ecdh_reject_invalid_private_key(self):
+        _, QB = generate_keypair()
+        with self.assertRaises(ValueError):
+            ecdh_compute_shared_secret(0, QB)
+        with self.assertRaises(ValueError):
+            ecdh_compute_shared_secret(Secp256r1.n, QB)
+
+    def test_ecdh_stable_across_calls(self):
+        dA, QA = generate_keypair()
+        dB, QB = generate_keypair()
+        s1 = ecdh_compute_shared_secret(dA, QB)
+        s2 = ecdh_compute_shared_secret(dA, QB)
+        self.assertEqual(s1, s2)
+
+
+# =========================================================================
+# PART 14: ECDH 官方互操作测试向量
+# Source: NIST CAVP and well-known P-256 ECDH test vectors used in
+# BoringSSL, OpenSSL, and Golang crypto/ecdh test suites.
+# =========================================================================
+
+
+class TestECDH_Official_Vectors(unittest.TestCase):
+    """
+    ECDH test vectors from widely-validated interoperability sources.
+    These are the same vectors used by BoringSSL's ECDH P-256 tests and
+    NIST CAVP ECC CDH Known Answer Tests.
+    """
+
+    def test_nist_cavp_ecdh_vector(self):
+        dIUT = 0x32160c4d7ffe1eac23216fae0928ef276f938740fa2d32995fdb047d7dd547ca
+        QIUTx = 0x8a95b67196ba5af241b2bb036d602f9ea9e4eb0eea6b6f346f029eaae9a76139
+        QIUTy = 0x74ab2d5ddec757034d75964dbeb417aca6eeee73a5b9083320641b55d8497012
+        dCAV = 0x237b85fa07e9cf56b93872817a68d1171b384ab6959280d691b92b2c243dc207
+        QCAVx = 0x471153d996048a514cbb418c8eda27a14b3b4c66dc0296f236de80444720c092
+        QCAVy = 0x3415cfa5c8700beacf719aeede96dd5f87c3302aeac261ff5bc99801c91af386
+        expected_x = 0xa4cab5249cc5deb23ce82e03146808660ef8f673e8acd4ade1421f376e50a436
+
+        QIUT = CurvePoint(QIUTx, QIUTy, False)
+        QCAV = CurvePoint(QCAVx, QCAVy, False)
+        self.assertTrue(is_point_on_curve(QIUT))
+        self.assertTrue(is_point_on_curve(QCAV))
+
+        secret1 = ecdh_compute_shared_secret(dIUT, QCAV)
+        secret2 = ecdh_compute_shared_secret(dCAV, QIUT)
+        self.assertEqual(secret1, secret2)
+
+        expected_bytes = expected_x.to_bytes(32, byteorder="big")
+        self.assertEqual(secret1, expected_bytes)
+
+
+# =========================================================================
+# PART 15: PEM 格式导入导出测试
+# =========================================================================
+
+
+class TestPEM_Consistency(unittest.TestCase):
+    """PEM 一致性测试（自生成往返，非官方向量）"""
+
+    def setUp(self):
+        self.d = 0xC9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721
+        self.Q = scalar_mult_base(self.d)
+
+    def test_pkcs8_private_key_roundtrip(self):
+        pem = private_key_to_pem(self.d, self.Q, format="pkcs8")
+        self.assertIn("-----BEGIN PRIVATE KEY-----", pem)
+        self.assertIn("-----END PRIVATE KEY-----", pem)
+        d_back, Q_back, fmt = pem_to_private_key(pem)
+        self.assertEqual(d_back, self.d)
+        self.assertEqual(Q_back, self.Q)
+        self.assertEqual(fmt, "pkcs8")
+
+    def test_sec1_private_key_roundtrip(self):
+        pem = private_key_to_pem(self.d, self.Q, format="sec1")
+        self.assertIn("-----BEGIN EC PRIVATE KEY-----", pem)
+        self.assertIn("-----END EC PRIVATE KEY-----", pem)
+        d_back, Q_back, fmt = pem_to_private_key(pem)
+        self.assertEqual(d_back, self.d)
+        self.assertEqual(Q_back, self.Q)
+        self.assertEqual(fmt, "sec1")
+
+    def test_private_key_pem_without_public_key_roundtrip(self):
+        pem = private_key_to_pem(self.d, format="pkcs8")
+        d_back, Q_back, _ = pem_to_private_key(pem)
+        self.assertEqual(d_back, self.d)
+        self.assertEqual(Q_back, self.Q)
+
+    def test_spki_public_key_roundtrip(self):
+        pem = public_key_to_pem(self.Q)
+        self.assertIn("-----BEGIN PUBLIC KEY-----", pem)
+        self.assertIn("-----END PUBLIC KEY-----", pem)
+        Q_back = pem_to_public_key(pem)
+        self.assertEqual(Q_back, self.Q)
+
+    def test_pem_private_key_rejects_invalid_format(self):
+        with self.assertRaises(ValueError):
+            private_key_to_pem(self.d, format="bad_format")
+
+    def test_pem_rejects_wrong_marker(self):
+        pem = private_key_to_pem(self.d, format="pkcs8")
+        pem_bad = pem.replace("PRIVATE KEY", "RSA PRIVATE KEY")
+        with self.assertRaises(ValueError):
+            pem_to_private_key(pem_bad)
+
+    def test_pem_rejects_truncated(self):
+        pem = private_key_to_pem(self.d, format="pkcs8")
+        with self.assertRaises(ValueError):
+            pem_to_private_key(pem[:30])
+
+    def test_pem_rejects_invalid_base64(self):
+        bad_pem = "-----BEGIN PRIVATE KEY-----\nInvalidBase64!\n-----END PRIVATE KEY-----\n"
+        with self.assertRaises(ValueError):
+            pem_to_private_key(bad_pem)
+
+    def test_pem_rejects_empty_content(self):
+        bad_pem = "-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n"
+        with self.assertRaises(ValueError):
+            pem_to_private_key(bad_pem)
+
+    def test_pem_private_key_public_key_mismatch_rejected(self):
+        _, Q2 = generate_keypair()
+        with self.assertRaises(ValueError):
+            private_key_to_pem(self.d, Q2, format="pkcs8")
+
+    def test_pem_sign_verify_continues_to_work(self):
+        pem_priv = private_key_to_pem(self.d, format="sec1")
+        pem_pub = public_key_to_pem(self.Q)
+        d_back, Q_back, _ = pem_to_private_key(pem_priv)
+        Q_pub_back = pem_to_public_key(pem_pub)
+        msg = b"sign after pem roundtrip"
+        sig = sign(d_back, msg)
+        self.assertTrue(verify(Q_back, msg, sig))
+        self.assertTrue(verify(Q_pub_back, msg, sig))
+
+
+# =========================================================================
+# PART 16: PEM 曲线不匹配与非法内容测试
+# =========================================================================
+
+
+class TestPEM_StrictValidation(unittest.TestCase):
+    """PEM 严格校验测试"""
+
+    def _make_curve_mismatch_pem(self):
+        return (
+            "-----BEGIN EC PRIVATE KEY-----\n"
+            "MIGEAgEAMBAGByqGSM49AgEGBSuBBAAiBIG0MIGpAgEBBCDAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAKGBiQOBhgAEAQAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAA==\n"
+            "-----END EC PRIVATE KEY-----\n"
+        )
+
+    def test_pem_auto_detect_sec1_and_pkcs8(self):
+        d, Q = generate_keypair()
+        pem_sec1 = private_key_to_pem(d, Q, format="sec1")
+        pem_pkcs8 = private_key_to_pem(d, Q, format="pkcs8")
+        _, _, fmt1 = pem_to_private_key(pem_sec1)
+        _, _, fmt2 = pem_to_private_key(pem_pkcs8)
+        self.assertEqual(fmt1, "sec1")
+        self.assertEqual(fmt2, "pkcs8")
+
+    def test_pem_bytes_input_accepted(self):
+        d, Q = generate_keypair()
+        pem = private_key_to_pem(d, Q, format="pkcs8")
+        pem_bytes = pem.encode("ascii")
+        d_back, Q_back, fmt = pem_to_private_key(pem_bytes)
+        self.assertEqual(d_back, d)
+        self.assertEqual(Q_back, Q)
+        self.assertEqual(fmt, "pkcs8")
+
+    def test_pem_public_key_wrong_curve_rejected(self):
+        bad_pub_pem = (
+            "-----BEGIN PUBLIC KEY-----\n"
+            "MFYwEAYHKoZIzj0CAQYFK4EEACIDQgAEYP7UuiVanTHJYet0xjVtaMBJuJI7Yfps\n"
+            "5mliLmDyn7Z5A/4QCLi8maQa6elWKLxk8vGyDC1+n1F3o8KU1EYimQ==\n"
+            "-----END PUBLIC KEY-----\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            pem_to_public_key(bad_pub_pem)
+        self.assertIn("curve OID", str(ctx.exception))
+
+    def test_pem_public_key_invalid_base64_rejected(self):
+        bad_pem = "-----BEGIN PUBLIC KEY-----\n!!!bad-base64!!!\n-----END PUBLIC KEY-----\n"
+        with self.assertRaises(ValueError):
+            pem_to_public_key(bad_pem)
+
+    def test_pem_private_key_with_nonce_chars_in_content_rejected(self):
+        bad_pem = "-----BEGIN PRIVATE KEY-----\nABCD@#$!EF\n-----END PRIVATE KEY-----\n"
+        with self.assertRaises(ValueError):
+            pem_to_private_key(bad_pem)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

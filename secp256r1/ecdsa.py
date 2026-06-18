@@ -44,6 +44,19 @@ def _hash_message(message: bytes, n: int) -> int:
     return hash_int
 
 
+def _prehash_to_int(digest: bytes, n: int) -> int:
+    if not isinstance(digest, (bytes, bytearray)):
+        raise TypeError("Prehashed digest must be bytes")
+    if len(digest) != 32:
+        raise ValueError(f"Prehashed digest must be exactly 32 bytes (SHA-256), got {len(digest)}")
+    hash_int = int.from_bytes(digest, byteorder="big")
+    n_bits = n.bit_length()
+    hash_bits = len(digest) * 8
+    if hash_bits > n_bits:
+        hash_int >>= (hash_bits - n_bits)
+    return hash_int
+
+
 def _bits2int(data: bytes, n: int) -> int:
     value = int.from_bytes(data, byteorder="big")
     data_bits = len(data) * 8
@@ -114,16 +127,20 @@ def sign(
     message: bytes,
     k: Optional[int] = None,
     deterministic: bool = False,
+    prehashed: bool = False,
 ) -> Tuple[int, int]:
     if not isinstance(private_key, int):
         raise TypeError("Private key must be an integer")
     if private_key <= 0 or private_key >= Secp256r1.n:
         raise ValueError("Private key must be in range [1, n-1]")
-    if not isinstance(message, (bytes, bytearray)):
-        raise TypeError("Message must be bytes")
 
     n = Secp256r1.n
-    z = _hash_message(message, n)
+    if prehashed:
+        z = _prehash_to_int(message, n)
+    else:
+        if not isinstance(message, (bytes, bytearray)):
+            raise TypeError("Message must be bytes")
+        z = _hash_message(message, n)
 
     if k is not None and deterministic:
         raise ValueError("Cannot specify both k and deterministic=True")
@@ -136,6 +153,8 @@ def sign(
         if k is not None:
             k_val = k
         elif deterministic:
+            if prehashed:
+                raise ValueError("deterministic=True is not supported with prehashed=True")
             if attempt == 0:
                 k_val = _generate_k_rfc6979(private_key, message, n)
             else:
@@ -177,6 +196,7 @@ def verify(
     public_key: CurvePoint,
     message: bytes,
     signature: Tuple[int, int],
+    prehashed: bool = False,
 ) -> bool:
     try:
         validate_point(public_key)
@@ -195,10 +215,15 @@ def verify(
     if r < 1 or r >= n or s < 1 or s >= n:
         return False
 
-    if not isinstance(message, (bytes, bytearray)):
-        raise TypeError("Message must be bytes")
-
-    z = _hash_message(message, n)
+    try:
+        if prehashed:
+            z = _prehash_to_int(message, n)
+        else:
+            if not isinstance(message, (bytes, bytearray)):
+                raise TypeError("Message must be bytes")
+            z = _hash_message(message, n)
+    except (TypeError, ValueError):
+        return False
 
     try:
         s_inv = mod_inv(s, n)
@@ -388,6 +413,9 @@ def _parse_der_integer_strict(data: bytes, offset: int) -> Tuple[int, int]:
         raise ValueError("Invalid DER: INTEGER value truncated")
 
     val_bytes = data[int_start : int_start + int_len]
+
+    if val_bytes[0] & 0x80:
+        raise ValueError("Invalid DER: negative INTEGER not allowed (missing 0x00 prefix for positive integer with high bit set)")
 
     if int_len > 1 and val_bytes[0] == 0x00 and not (val_bytes[1] & 0x80):
         raise ValueError("Invalid DER: unnecessary leading 0x00 padding on INTEGER")
