@@ -313,19 +313,24 @@ def _pem_decode(label: str, pem_text: str) -> bytes:
     if isinstance(pem_text, bytes):
         pem_text = pem_text.decode("ascii", errors="strict")
 
-    pem_text = pem_text.strip()
     begin_marker = f"-----BEGIN {label}-----"
     end_marker = f"-----END {label}-----"
 
-    begin_idx = pem_text.find(begin_marker)
-    if begin_idx == -1:
-        raise ValueError(f"PEM missing BEGIN {label} marker")
+    pem_text = pem_text.strip()
 
-    end_idx = pem_text.find(end_marker, begin_idx + len(begin_marker))
+    if not pem_text.startswith(begin_marker):
+        raise ValueError(f"PEM must start with BEGIN {label} marker (no extra text before it)")
+
+    end_idx = pem_text.find(end_marker, len(begin_marker))
     if end_idx == -1:
         raise ValueError(f"PEM missing END {label} marker")
 
-    b64_content = pem_text[begin_idx + len(begin_marker) : end_idx]
+    after_end = end_idx + len(end_marker)
+    remaining = pem_text[after_end:].strip()
+    if remaining:
+        raise ValueError(f"PEM has extra text after END {label} marker")
+
+    b64_content = pem_text[len(begin_marker) : end_idx]
     b64_clean = "".join(b64_content.split())
 
     if not b64_clean:

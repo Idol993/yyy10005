@@ -37,12 +37,25 @@ from .ecdh import (
     ecdh_compute_shared_secret,
     ecdh_compute_shared_secret_and_hash,
     ecdh_verify_consistency,
+    ecdh_derive_key,
+    hkdf_sha256,
+    hkdf_sha256_extract,
+    hkdf_sha256_expand,
+    HKDF_SHA256_MAX_LENGTH,
 )
 from .pem import (
     private_key_to_pem,
     pem_to_private_key,
     public_key_to_pem,
     pem_to_public_key,
+)
+from .jwk import (
+    private_key_to_jwk,
+    public_key_to_jwk,
+    jwk_to_private_key,
+    jwk_to_public_key,
+    jwk_to_json,
+    json_to_jwk,
 )
 
 __all__ = [
@@ -78,9 +91,20 @@ __all__ = [
     "ecdh_compute_shared_secret",
     "ecdh_compute_shared_secret_and_hash",
     "ecdh_verify_consistency",
+    "ecdh_derive_key",
+    "hkdf_sha256",
+    "hkdf_sha256_extract",
+    "hkdf_sha256_expand",
+    "HKDF_SHA256_MAX_LENGTH",
     "private_key_to_pem",
     "pem_to_private_key",
     "public_key_to_pem",
     "pem_to_public_key",
+    "private_key_to_jwk",
+    "public_key_to_jwk",
+    "jwk_to_private_key",
+    "jwk_to_public_key",
+    "jwk_to_json",
+    "json_to_jwk",
 ]
 
